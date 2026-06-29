@@ -1,0 +1,12 @@
+/* Base reset; component styles live in App.css. */
+:root {
+  color-scheme: dark;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+}

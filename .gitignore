@@ -1,0 +1,28 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Tooling binaries
+bin/go2rtc*.exe
+bin/ffmpeg*
+
+# Generated go2rtc config (contains Hub credentials in RTSP URLs!)
+bin/go2rtc.gen.yaml
+bin/*.png
+bin/*.jpg
+
+# Runtime data
+data/
+clips_cache/
+*.log
+
+# Debug / capture artifacts (camera footage + raw protocol dumps — keep local)
+*.mp4
+*.pcapng
+bin/*.bin
