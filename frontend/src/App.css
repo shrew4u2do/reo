@@ -124,6 +124,24 @@ body {
   padding: 0.3rem 0.6rem;
   cursor: pointer;
 }
+.nudge-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.6rem 0 0.1rem;
+}
+.nudge-row .nudge {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.nudge-row .nudge:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .playback-toolbar input[type='date'] {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -203,10 +221,69 @@ body {
   margin-top: 0.6rem;
 }
 .timeline-time {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   font-variant-numeric: tabular-nums;
   font-size: 1.1rem;
   margin-bottom: 0.35rem;
   color: var(--text);
+}
+.timeline-hint {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: normal;
+}
+.timeline-zoomreset {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #11151b;
+  color: var(--muted);
+  cursor: pointer;
+}
+.timeline-zoomreset:hover {
+  color: var(--text);
+  border-color: rgba(76, 141, 255, 0.6);
+}
+
+/* Overview: whole-day strip with a draggable viewport box (visible when zoomed). */
+.timeline-overview {
+  position: relative;
+  height: 20px;
+  margin-bottom: 6px;
+  background: #0a0c0f;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  touch-action: none;
+  cursor: grab;
+  overflow: hidden;
+}
+.timeline-overview:active {
+  cursor: grabbing;
+}
+.timeline-overview .timeline-seg {
+  top: 5px;
+  height: 10px;
+}
+.timeline-viewport {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  background: rgba(76, 141, 255, 0.18);
+  border-left: 2px solid rgba(76, 141, 255, 0.8);
+  border-right: 2px solid rgba(76, 141, 255, 0.8);
+  pointer-events: none;
+}
+.timeline-ovplayhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ff5b5b;
+  pointer-events: none;
 }
 .timeline-bar {
   position: relative;

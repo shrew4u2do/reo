@@ -13,22 +13,45 @@ const HEVC_CODECS = [
 ]
 const H264_CODECS = ['video/mp4; codecs="avc1.640028"', 'video/mp4; codecs="avc1.4d4028"', 'video/mp4; codecs="avc1.42e01e"']
 
+// iPhone Safari has NO `window.MediaSource` — it exposes `ManagedMediaSource`
+// (iOS 17.1+) instead. Referencing a missing `MediaSource` at module load would
+// throw and black out the whole app, so resolve whichever exists (or neither).
+type MSCtor = { new (): MediaSource; isTypeSupported(type: string): boolean }
+const g = globalThis as unknown as { MediaSource?: MSCtor; ManagedMediaSource?: MSCtor }
+const MS: MSCtor | undefined = g.MediaSource || g.ManagedMediaSource
+const IS_MANAGED = !!g.ManagedMediaSource && MS === g.ManagedMediaSource
+
 /** True if the browser's MSE can play this stream's HEVC level. */
 export function mseSupportsHevc(): boolean {
-  return supportsHevc() && HEVC_CODECS.some((c) => MediaSource.isTypeSupported(c))
+  if (!MS) return false
+  try {
+    return supportsHevc() && HEVC_CODECS.some((c) => MS.isTypeSupported(c))
+  } catch {
+    return false
+  }
 }
 
 function pickMime(hevc: boolean): string {
   const list = hevc ? HEVC_CODECS : H264_CODECS
-  return list.find((c) => MediaSource.isTypeSupported(c)) || list[0]
+  return (MS && list.find((c) => MS.isTypeSupported(c))) || list[0]
 }
 
 /** Start streaming `url` (fMP4) into `video` via MSE. Returns a stop function. */
 export function startMsePlayback(video: HTMLVideoElement, url: string, hevc: boolean): () => void {
   const abort = new AbortController()
   let stopped = false
-  const ms = new MediaSource()
-  video.src = URL.createObjectURL(ms)
+  if (!MS) return () => {} // no MSE/ManagedMediaSource (older iOS) — can't play here
+  const ms = new MS()
+  if (IS_MANAGED) {
+    // ManagedMediaSource must be attached via srcObject, with remote playback off.
+    // Drop any leftover preview .src, which would otherwise shadow srcObject.
+    video.removeAttribute('src')
+    ;(video as unknown as { disableRemotePlayback: boolean }).disableRemotePlayback = true
+    ;(video as unknown as { srcObject: MediaSource | null }).srcObject = ms
+  } else {
+    video.srcObject = null
+    video.src = URL.createObjectURL(ms)
+  }
 
   ms.addEventListener('sourceopen', () => {
     let sb: SourceBuffer
