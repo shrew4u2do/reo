@@ -13,6 +13,7 @@ import logging
 import time
 from datetime import datetime
 
+from .cache import clip_cache
 from .config import settings
 from .go2rtc import _find_ffmpeg
 from .hub import hub
@@ -21,10 +22,19 @@ from . import bc_replay, bc_demux
 _LOG = logging.getLogger("reo.bcplay")
 _lock = asyncio.Lock()
 _stream: "PlaybackStream | None" = None
-_playing_until = 0.0
+_playing_until = 0.0  # grace-window cooldown after a stream closes
+_PLAYBACK_GRACE_S = 20.0
 
 
 def playback_active() -> bool:
+    """True while a replay stream is open — even if its media has STALLED — plus a
+    short grace window after it closes. The mirror keys its back-off on this, so it
+    yields the Hub to playback for the whole session, not just while bytes flow.
+    (The old version only marked activity per emitted chunk, so a stuck seek let the
+    mirror resume after 10s and pile more load onto an already-wedged Hub.)"""
+    s = _stream
+    if s is not None and not s.stopped:
+        return True
     return time.time() < _playing_until
 
 
@@ -79,7 +89,11 @@ def _install_filter() -> None:
         keep = bytearray()
         try:
             for cmd_id, mclass, poff, body, raw in _filter_framer.feed(data):
-                if cmd_id == 5 and mclass == "416a":
+                # Replay media arrives as cmd 5 with a non-zero message class; the
+                # Hub has tagged it both "416a" and "436a" across firmware — route
+                # either to the active stream. Acks/command replies are class 0000
+                # and must pass through to reolink_aio.
+                if cmd_id == 5 and mclass in ("416a", "436a"):
                     sink = _media_sink
                     if sink is not None:
                         sink(body, poff)
@@ -122,6 +136,7 @@ class PlaybackStream:
         return chosen
 
     async def open(self, t_ms: int) -> None:
+        clip_cache.hold_background(True)  # mirror yields the Hub while we play
         when = datetime.fromtimestamp(t_ms / 1000)
         self.uid, self.files = await _list_files_cached(self.host, self.channel, when, self.stream_kind)
         if not self.files:
@@ -186,19 +201,19 @@ class PlaybackStream:
         global _playing_until
         try:
             while True:
-                _playing_until = time.time() + 10
                 chunk = await self.ffmpeg.stdout.read(65536)
                 if not chunk:
                     break
                 yield chunk
         finally:
-            _playing_until = 0.0
+            _playing_until = time.time() + _PLAYBACK_GRACE_S  # cooldown after close
             await self.close()
 
     async def close(self) -> None:
         if self.stopped:
             return
         self.stopped = True
+        clip_cache.hold_background(False)  # release the mirror (grace window applies)
         global _media_sink
         if _media_sink is self._sink:  # only if a newer stream hasn't taken over
             _media_sink = None
@@ -225,7 +240,12 @@ async def open_stream(channel: int, t_ms: int, stream_kind: str, transcode: bool
             await _stream.close()
         s = PlaybackStream(channel, stream_kind, transcode)
         _stream = s
-        await s.open(t_ms)
+        try:
+            await s.open(t_ms)
+        except Exception:
+            _LOG.warning("replay open failed", exc_info=True)
+            await s.close()  # don't leak an "active" stream that holds the mirror
+            raise
     async for chunk in s.output():
         yield chunk
 

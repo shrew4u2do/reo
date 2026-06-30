@@ -22,6 +22,11 @@ class Settings:
     username: str = os.getenv("REOLINK_USERNAME", "admin")
     password: str = os.getenv("REOLINK_PASSWORD", "")
     use_https: bool = _bool(os.getenv("REOLINK_USE_HTTPS"), True)
+    # Background sub-stream mirror: pre-caches clips for instant scrub preview.
+    # On by default (gentle: 25s gaps, hard-pauses while a replay stream is open,
+    # circuit-breaker on Hub stalls). Set REOLINK_MIRROR=0 to disable on a Hub that
+    # still can't take the sustained load (e.g. when debugging Hub wedging).
+    mirror_enabled: bool = _bool(os.getenv("REOLINK_MIRROR"), True)
 
 
 settings = Settings()

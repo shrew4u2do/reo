@@ -41,7 +41,7 @@ RECENT_INTERVAL_S = 120
 RECENT_WINDOW_MIN = 30
 BACKFILL_PASS_PAUSE_S = 3600  # wait between full backfill passes
 RETENTION_INTERVAL_S = 6 * 3600
-MIRROR_GAP_S = 10  # pause between background segment downloads (gentle on the Hub)
+MIRROR_GAP_S = 25  # pause between background segment downloads (gentle on the Hub)
 
 
 class MirrorService:

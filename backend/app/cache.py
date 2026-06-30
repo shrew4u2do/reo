@@ -66,6 +66,10 @@ class ClipCache:
         self._io_active = 0
         self._no_io = asyncio.Event()
         self._no_io.set()
+        # Held (cleared) while a Baichuan replay stream is open, so the background
+        # mirror starts no new Hub downloads and leaves the bandwidth to playback.
+        self._play_ok = asyncio.Event()
+        self._play_ok.set()
         # Circuit breaker: after repeated background failures, stop hammering the
         # Hub so it can recover. Interactive (user) downloads ignore the breaker.
         self._bg_failures = 0
@@ -79,6 +83,14 @@ class ClipCache:
         """True if a user-facing (interactive) download ran recently — the mirror
         backs off so the Hub has spare capacity for scrubbing/playback."""
         return time.time() - self._last_interactive < window
+
+    def hold_background(self, hold: bool) -> None:
+        """Pause (hold=True) or resume (hold=False) background mirror downloads
+        while a replay stream is open, so the fragile Hub serves playback first."""
+        if hold:
+            self._play_ok.clear()
+        else:
+            self._play_ok.set()
 
     def progress_bytes(self, camera: str, stream: str, file_name: str) -> int:
         """Bytes downloaded so far for an in-progress segment (0 if none)."""
@@ -153,8 +165,10 @@ class ClipCache:
             self._no_io.clear()
         try:
             if not interactive:
-                # Yield Hub bandwidth to any active interactive download.
+                # Yield Hub bandwidth to any active interactive download AND to an
+                # open replay stream (held until playback closes).
                 await self._no_io.wait()
+                await self._play_ok.wait()
             sem = self._io_sem if interactive else self._bg_sem
             async with sem:
                 if dest.exists():
@@ -224,7 +238,10 @@ class ClipCache:
             # floor. Catches both dead-stall (0 bytes) and slow-drip (a few KB),
             # which a plain "any growth" check misses.
             nonlocal stalled
-            min_growth = 1300 * 1024  # ~43 KB/s over the window; usable DLs clear it
+            # ~12 KB/s over the window. MUST stay well below the Hub's real sub-stream
+            # serving rate (~38-44 KB/s) — a higher floor (the old ~43 KB/s) killed
+            # healthy-but-slow sub downloads as "stalled", so the mirror cached nothing.
+            min_growth = 360 * 1024
             win_start = time.monotonic()
             win_size = dest.stat().st_size if dest.exists() else 0
             while True:
