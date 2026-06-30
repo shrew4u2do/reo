@@ -7,20 +7,22 @@ and phone.
 ## Architecture
 
 ```
-Browser (PC + phone)  ── React + TypeScript (Vite)
-        │  /api  (HTTP)              │  WebRTC/HLS
-        ▼                           ▼
-FastAPI backend  ──spawns──►  go2rtc  ──RTSP──►  Reolink Home Hub
-  • reolink_aio (Hub CGI/Baichuan API)            (cameras + SD card)
-  • recording search / playback (Phase 3+)
+Browser (React + TS, PC + phone)
+   │ live (WebRTC)        │ recorded HD (fMP4 / MSE)      │ scrub preview (MP4)
+   ▼                      ▼                               ▼
+go2rtc ◄──spawns── FastAPI backend ──────────────────────────► Reolink Home Hub
+ RTSP→WebRTC          • reolink_aio: Hub CGI + Baichuan API       (cameras + SD)
+                      • Baichuan replay (TCP 9000) → demux → ffmpeg → fMP4
+                      • sub-stream mirror: CGI download → local clip cache
 ```
 
-- **Backend** (`backend/`): Python + FastAPI. Talks to the Hub via
-  `reolink_aio`; generates the go2rtc config and runs go2rtc as a subprocess.
-- **go2rtc** (`bin/go2rtc.exe`): pulls camera RTSP and republishes as
-  low-latency WebRTC to browsers; transcodes H.265→H.264 when needed.
-- **Frontend** (`frontend/`): React + TypeScript live grid; timeline scrubber
-  (Phase 4).
+- **Backend** (`backend/`): Python + FastAPI. Talks to the Hub via `reolink_aio`;
+  spawns go2rtc for live; implements the native **Baichuan replay** protocol for
+  recorded HD; runs a background sub-stream mirror for instant scrubbing.
+- **go2rtc** (`bin/go2rtc.exe`): pulls camera RTSP and republishes as low-latency
+  WebRTC for the **live** view; transcodes H.265→H.264 when a browser needs it.
+- **Frontend** (`frontend/`): React + TypeScript. Live grid, plus a playback view
+  with a zoomable timeline and Nest-style two-tier scrubbing.
 
 ## Prerequisites
 
@@ -53,80 +55,93 @@ To verify the Hub connection on its own: `cd backend && .venv\Scripts\python tes
 - [x] **Phase 2** — Live view: go2rtc WebRTC live grid (responsive).
 - [x] **Phase 3** — Timeline + recorded playback: sub-stream segments cached to
   disk (seekable, Range), real-time in-segment scrubbing, date nav, prefetch.
-- [x] **Phase 4** — Nest-style scrubbing: background sub mirror (14-day,
-  recent+backfill+retention), real-time cross-segment scrubbing, timeline shows
-  mirrored vs not-yet-mirrored footage, opens on latest cached moment.
-- [x] **Phase 5a** — HD-on-settle: scrub on sub, and when you settle the picture
-  upgrades to 1080p (4K H.265 → H.264 transcode), with sub playing until HD is
-  ready. Interactive HD fetches preempt the background mirror.
-- [ ] **Phase 5b** — Timeline zoom (precise seeking on a 24h bar), multi-cam,
-  remote access, deploy to a permanent host.
+- [x] **Phase 4** — Nest-style scrubbing: background sub mirror (recent + backfill
+  + retention), real-time cross-segment scrubbing, timeline shows mirrored vs
+  not-yet-mirrored footage, opens on the latest cached moment.
+- [x] **Phase 5** — Native **Baichuan replay**: recorded **4K HEVC** streamed
+  straight from the Hub (TCP 9000) to the browser via MSE — the fast HD path that
+  replaces the slow CGI-download/transcode approach. Two-tier scrub (drag = cached
+  sub preview, release = replay at that moment) and a **zoomable timeline** for
+  precise seeking.
+- [ ] **Next** — multi-camera layout, remote access, deploy to a permanent host
+  (e.g. a Raspberry Pi), precise within-segment HD seeking.
 
-## HD-on-settle
+## Recorded playback (Baichuan replay)
 
-The main stream is 4K **H.265**. The frontend feature-detects HEVC support
-(`supportsHevc()` via `canPlayType`) and picks the best path:
+Recorded video plays over the Hub's native **Baichuan** protocol (TCP port 9000)
+— the same path the Reolink desktop app uses, and the only fast route to the main
+stream. The backend opens one replay on the shared Hub connection, tees the media
+off the socket, demuxes the H.265 frames, pipes them through ffmpeg into a
+fragmented MP4, and streams that to the browser's **MSE** SourceBuffer.
 
 - **HEVC-capable browsers** (Chrome 107+ with a hardware HEVC decoder, Safari,
-  modern phones) get **native 4K** — the main segment is only remuxed (`-c copy`,
-  tagged `hvc1`), no transcode. Badge: "4K".
-- **Other browsers** get a 1080p **H.264** transcode (`libx264 veryfast`,
-  ~15x realtime). Badge: "HD".
+  modern phones) get **native 4K** — the replay is remuxed (`-c copy`, tagged
+  `hvc1`), no transcode. Badge: "4K".
+- **Other browsers** get a 1080p **H.264** transcode (`libx264`). Badge: "HD".
 
-Either way the clip is downloaded from the Hub on demand and cached seekably
-under `data/clips/<cam>/{main,hd}/`. **HD is opt-in via a "Load HD/4K" button** —
-not automatic — because an un-cached HD segment takes minutes to fetch (the Hub
-serves recordings at only ~75–150 KB/s and a 4K segment is 30–40 MB; there's no
-mid-size stream and `NvrDownload` for partial fetches is rejected by the
-firmware). Scrubbing always stays on the instant sub stream; clicking Load HD
-shows a download **progress %**, keeps sub playing until ready, then swaps.
-Cached HD is instant on revisit.
+Clicking the timeline (re)opens the replay at the covering 5-min **segment start**
+(~3–5 s to first frame, then smooth realtime 4K). True instant within-segment
+seeking isn't possible on this Hub — Baichuan `cmd 123` can't cross the 5-min file
+boundary, and the browser freezes on the mid-stream `hvc1` codec discontinuity —
+so each seek reopens the stream; a watchdog retries a stuck open instead of
+spinning forever.
+
+> The replay media frame class varies by firmware (`416a` / `436a`); the backend's
+> socket filter routes both. If playback goes black while the handshake otherwise
+> succeeds, a new media class is the first thing to check.
+
+## Two-tier scrubbing & timeline zoom
+
+While you **drag** the timeline, the video shows the cached low-res **sub** clip
+and seeks within it (instant once cached); when you **release**, it opens the
+Baichuan replay (HD/4K) at that moment — Nest-style. The background mirror keeps
+recent sub clips cached so dragging is instant over recent footage; uncached
+regions cache on demand as you scrub into them.
+
+The 24-hour timeline **zooms** for precise seeking (otherwise it's ~80 s/px):
+
+- **scroll / pinch** to zoom, anchored on the cursor
+- **double-click** to toggle a ~10-min window ↔ the full day
+- when zoomed, an **overview strip** shows the whole day with a draggable viewport
+  box to pan; tick spacing adapts (3 h → 5 m → 30 s) as you zoom in
+
+## The sub-stream mirror
+
+`app/mirror.py` pre-caches the lightweight sub stream to local disk
+(`data/clips/<cam>/sub/<YYYY-MM-DD>/`) so scrubbing is instant. Three loops:
+**recent** (keep the last ~30 min warm), **backfill** (walk back over recent days),
+**retention** (drop cached days older than 14). HD/4K is never mirrored — it
+streams live over Baichuan. Status at `GET /api/mirror`. The mirror is **on by
+default**; set `REOLINK_MIRROR=0` to disable it (e.g. while debugging the Hub).
 
 ### Hub fragility & robustness
 
-The Home Hub falls over (downloads stall to ~0 B/s) under sustained concurrent
-recording requests. Mitigations:
+The Home Hub is easily overwhelmed: it has a small connection limit and its CGI
+download path stalls under load. Mitigations:
 
-- **Gentle mirror**: background segments download one at a time with a 4 s gap.
-- **Circuit breaker**: after repeated background failures the mirror pauses 5 min
-  so the Hub can recover. Interactive (user) requests ignore the breaker.
-- **Interactive priority**: a user fetch uses a separate slot and pauses the
-  mirror while active, so it gets the Hub's full bandwidth.
-- **Stall detection**: downloads run via `curl` with a file-size throughput
-  watchdog (kills a transfer below ~43 KB/s), and the frontend has its own
-  throughput watchdog so it shows "Hub busy / too slow — try again" within ~35 s
-  instead of spinning. 20 s retry cooldown after a failure.
+- **Single connection** — all Hub traffic (live, replay, downloads) reuses one
+  `reolink_aio` connection. Opening a connection per seek exhausts the Hub's
+  session limit and wedges it until a reboot.
+- **Mirror yields to playback** — while a replay stream is open the mirror starts
+  no new downloads (for the whole stream, even if its media stalls), so playback
+  gets the Hub's full bandwidth.
+- **Gentle mirror** — background segments download one at a time with a 25 s gap.
+- **Circuit breaker** — after repeated background failures the mirror pauses 5 min
+  so the Hub can recover; interactive (user) requests ignore the breaker.
+- **Stall detection** — downloads run via `curl` with a file-size throughput
+  watchdog that kills a truly dead/dribbling transfer (below ~12 KB/s) while
+  letting the Hub's normal ~38–44 KB/s sub downloads through.
 
 If the Hub gets wedged anyway, a **reboot** restores it.
 
-Download scheduling (`app/cache.py`): interactive playback requests use a
-separate slot from the background mirror and pause the mirror while active, so a
-user fetch is never stuck behind the mirror. Total Hub concurrency stays at 2 —
-the Hub becomes unstable under heavier concurrent load.
-
-## Mirror
-
-`app/mirror.py` runs three background loops: **recent** (cache the last ~30 min
-every 2 min), **backfill** (walk back over the retention window caching all
-sub segments), **retention** (drop cached days older than 14). HD/main is fetched
-on demand. Cache lives in `data/clips/<cam>/<stream>/<YYYY-MM-DD>/`. Status at
-`GET /api/mirror`. Initial backfill of history is slow (~38 KB/s sub) — recent
-footage caches first, history fills in over a day or two.
-
-## The key constraint: Hub recording speed
-
-The Home Hub serves recordings at **~38 KB/s** with **no HTTP Range** support.
-That's ~5.7x realtime for the **sub** stream (so caching + sequential play work
-well) but only ~0.5x realtime for the **main/HD** stream (so on-demand HD is
-impractical). The app caches each sub segment locally on first view, then serves
-it seekably. Smooth full-day scrubbing and HD both point toward a **background
-local mirror** (continuously copy recordings off the Hub) — the Phase 4/5 work.
-
 ## Notes / known constraints
 
-- The Hub has **no fast RTSP timestamp-seek** and **no ONVIF Profile G**.
-  Recordings are accessed via the CGI API: `Search` → `NvrDownload` (assembles
-  an arbitrary range, 1s precision) → `Download` MP4 (HTTP Range supported).
-- Recordings are dual-stream: the low-res **sub** stream doubles as the scrub
-  **preview track** (Phase 4).
+- The Hub has **no fast RTSP timestamp-seek** and **no ONVIF Profile G** — the
+  fast recorded path is the proprietary Baichuan replay implemented here. (The CGI
+  `Search`/`Download` API is still used to fetch sub clips for the mirror.)
+- Recordings are dual-stream, 5-min segments: the 4K H.265 **main** stream plays
+  over Baichuan; the low-res H.264 **sub** stream doubles as the scrub preview.
+- The Hub serves CGI sub downloads at only ~38–44 KB/s (no HTTP Range), so the
+  mirror caches recent footage first and fills history in over time.
 - Battery cameras behind the Hub drop RTSP after ~5 min; wired cams stream 24/7.
+- The camera image may appear rotated, depending on how it's mounted.
