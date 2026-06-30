@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import bcplay
 from .config import settings
 from .go2rtc import go2rtc
 from .hub import hub
@@ -25,13 +24,10 @@ from .recordings import router as recordings_router
 async def lifespan(app: FastAPI):
     await hub.connect()
     await go2rtc.start()
-    # Sub-stream mirror pre-caches low-res clips for instant timeline scrubbing,
-    # but it hammers a fragile Hub (stalls all downloads incl. Baichuan replay).
-    # Opt-in only — see REOLINK_MIRROR. Default off: Baichuan replay is the
-    # primary playback path and doesn't need the mirror.
+    # Pre-remux the most recent NAS segments so scrubbing the live edge is instant
+    # (cheap local stream-copy; the Hub is not involved). See REOLINK_MIRROR.
     if settings.mirror_enabled:
         mirror.start()
-    await bcplay._replenish_spare()  # pre-warm a replay connection for fast first seek
     try:
         yield
     finally:

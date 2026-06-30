@@ -197,6 +197,25 @@ body {
   color: var(--accent);
   border-color: var(--accent);
 }
+.now-btn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+.now-btn:hover {
+  border-color: #ff5b5b;
+  color: #ff5b5b;
+}
+/* Solid red only while actually live. */
+.now-btn.on {
+  background: #ff5b5b;
+  border-color: #ff5b5b;
+  color: #fff;
+}
 .hd-badge {
   position: absolute;
   top: 0.6rem;
@@ -295,15 +314,32 @@ body {
   cursor: pointer;
   overflow: hidden;
 }
+/* Non-clipping wrapper so the scrub preview can float above the clipped bar. */
+.timeline-barwrap {
+  position: relative;
+}
+.timeline-thumb {
+  position: absolute;
+  bottom: calc(100% + 8px); /* float just above the bar */
+  width: 160px;
+  aspect-ratio: 16 / 9;
+  transform: translateX(-50%);
+  object-fit: cover;
+  background: #0a0c0f;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 5;
+}
 .timeline-seg {
   position: absolute;
   top: 10px;
   height: 28px;
-  /* On the Hub but not yet mirrored locally (scrubbing here may pause to fetch). */
-  background: rgba(120, 130, 145, 0.25);
+  /* Recording present for this span on the NAS. */
+  background: rgba(76, 141, 255, 0.5);
 }
 .timeline-seg.cached {
-  /* Mirrored locally — instant scrubbing. */
   background: rgba(76, 141, 255, 0.5);
 }
 .timeline-tick {

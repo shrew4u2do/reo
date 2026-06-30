@@ -9,8 +9,11 @@ Reolink **Home Hub** (one fragile little NVR, currently 1 wired camera "Front
 Door" on channel 0), with Nest-style timeline scrubbing. Usable from PC and phone
 on the same Wi-Fi. Dev-only on this Windows PC for now.
 
-The hard-won protocol/architecture history lives in the `reo-project` auto-memory
-— read it before touching playback. Below is the operational big picture.
+Live comes from the Hub (go2rtc → WebRTC). **Recorded video is read from a NAS
+share** (`Z:\reo`, SMB-mounted) that the Hub FTP-uploads to — the Hub is no longer
+in the playback path. (The previous design replayed main-stream over the
+reverse-engineered Baichuan protocol; that whole stack was removed — see the
+`reo-project` auto-memory for that history.) Below is the operational big picture.
 
 ## Commands
 
@@ -36,10 +39,11 @@ npm run build      # tsc -b && vite build
 npm run lint       # oxlint
 ```
 
-**There is no automated test suite.** `backend/test_*.py` and `backend/decrypt_capture.py`
-are manual spike/diagnostic scripts (Baichuan protocol reversing, pcap parsing)
-run directly with `.venv\Scripts\python test_xxx.py`. They are not pytest and are
-not wired into CI. The backend has no linter configured.
+**There is no automated test suite.** `backend/test_connection.py` verifies Hub
+connectivity. The other `backend/test_*.py`, `backend/decrypt_capture.py`, and the
+top-level `backend/bc_*.py` are now-obsolete Baichuan protocol-reversing spikes,
+kept only for history — they import deleted modules and don't run. Nothing here is
+pytest or wired into CI. The backend has no linter configured.
 
 **Process hygiene (important):** detached `Start-Process` restarts leave STALE
 python processes serving OLD code — a frequent source of "my fix didn't work"
@@ -50,69 +54,63 @@ single uvicorn process is running.
 
 ```
 Browser (React/Vite)
-  │  /api (HTTP)            │  WebRTC/HLS (live)        │  fMP4 over HTTP (recorded)
+  │  /api (HTTP)            │  WebRTC/HLS (live)        │  MP4 over HTTP (recorded)
   ▼                        ▼                           ▼
-FastAPI backend ──spawns──► go2rtc ──RTSP──► Hub        Baichuan TCP :9000 ──► Hub
-  • reolink_aio Host (ONE shared connection to the Hub)
-  • cache.py / mirror.py (CGI Download of sub clips to disk)
-  • bcplay.py (native Baichuan replay → demux → ffmpeg → fMP4)
+FastAPI backend ──spawns──► go2rtc ──RTSP──► Hub        NAS (SMB Z:\reo) ── read MP4/JPEG
+  • reolink_aio Host (ONE shared connection to the Hub — live + camera list only)
+  • nas.py (index NAS segments by filename; lazy ffmpeg remux → seekable MP4)
+  • mirror.py (pre-remux recent segments; purge the local remux cache)
 ```
 
-Three distinct video paths, each solving a different problem:
+Two video paths:
 
 1. **Live** — `go2rtc.py` generates `bin/go2rtc.gen.yaml` (RTSP URLs *with Hub
    credentials* — gitignored) and runs `bin/go2rtc.exe` as a subprocess. go2rtc
    pulls camera RTSP and republishes WebRTC to the browser (`LiveTile.tsx` wraps
-   the vendored `src/lib/video-rtc.js` web component).
+   the vendored `src/lib/video-rtc.js` web component). Unchanged by the NAS work.
 
-2. **Recorded, sub-stream (scrub preview)** — `cache.py` (`ClipCache`) downloads
-   5-min low-res segments via the Hub's slow CGI `Download` (~38 KB/s, no Range)
-   to `data/clips/<cam>/<stream>/<YYYY-MM-DD>/<sha1>.mp4`, remuxes with ffmpeg,
-   serves seekably. `mirror.py` pre-caches recent days in the background.
-   Endpoints: `/api/recordings`, `/api/clip`, `/api/prefetch`.
+2. **Recorded** — the Hub FTP-uploads recordings to the NAS (`REOLINK_NAS_ROOT`,
+   default `Z:\reo`): one folder per day of ~10-min **4K HEVC + AAC fragmented
+   MP4** segments plus **per-minute JPEG snapshots**, named
+   `<Cam>_<NN>_<Hub>_<YYYYMMDDHHMMSS>.{mp4,jpg}`. `nas.py` (`NasLibrary`) indexes
+   them from the filenames (durations come from neighbouring start times — no
+   per-file probe). The fragmented MP4s carry no seek index (`sidx`/`mfra`), so
+   each is lazily remuxed — `ffmpeg -c copy` (native 4K HEVC), or 1080p H.264 for
+   browsers without an HEVC decoder — into a seekable MP4 cached under
+   `data/clips/<cam>/<mode>/<YYYY-MM-DD>/`, served with HTTP Range. The JPEGs are
+   the scrub-bar preview. `mirror.py` pre-remuxes recent segments.
+   Endpoints: `/api/recordings`, `/api/clip`, `/api/thumbnail`, `/api/prefetch`.
 
-3. **Recorded, main-stream HD/4K (the hard part)** — `bcplay.py` implements the
-   proprietary **Baichuan replay protocol** (the only fast path to main-stream
-   recordings; CGI Download is too slow for 4K). It drives `reolink_aio`'s
-   `host.baichuan.send(...)`, tees the raw socket to capture class-416a media,
-   demuxes BcMedia/H.265 frames (`bc_demux.py`), pipes through ffmpeg to hvc1
-   fragmented MP4, and streams it to the browser's MSE (`src/lib/mse.ts`).
-   `bc_replay.py` holds the cmd14/15/123/5 handshake helpers.
-   Endpoints: `/api/bcplay`, `/api/bcplay/seek`.
-
-`hub.py` (`HubManager`, singleton `hub`) owns the single `reolink_aio.Host`.
-`config.py` reads Hub host/creds from `backend/.env` (gitignored). `main.py`
-wires the lifespan: connect hub → start go2rtc → start mirror → pre-warm a replay
-connection. The frontend's top-level state (`App.tsx` live grid ↔
+`hub.py` (`HubManager`, singleton `hub`) owns the single `reolink_aio.Host` — now
+used only for live RTSP and the camera list. `config.py` reads Hub creds + NAS root
+from `backend/.env` (gitignored). `main.py` wires the lifespan: connect hub → start
+go2rtc → start mirror. The frontend's top-level state (`App.tsx` live grid ↔
 `PlaybackView.tsx` timeline) and `api.ts` are the client entry points.
 
 ## Non-negotiable constraints (do not re-litigate — see memory for the full why)
 
 - **ONE Hub connection.** The Home Hub has a tiny max-session limit (rspCode -5)
-  and frees connections slowly. Reuse `hub.host` for everything; NEVER open a
-  connection-per-seek — it exhausts sessions and wedges the Hub until reboot.
-  `logout()` on one connection disrupts others.
-- **The permanent media filter** in `bcplay.py` (`_install_filter`) strips
-  Baichuan replay media (class 416a) from reolink_aio's command parser (which
-  would otherwise desync) and routes it to the active stream. Never remove it.
-- **Playback file list must come from `request_vod_files`** (full-day CGI search),
-  NOT the Baichuan cmd14/15 list (truncated to ~40 files → seeks past ~03:16
-  clamp to the same segment).
-- **In-place cmd123 re-seek does not work** for full scrubbing: cmd123 can't
-  cross the 5-min file boundary, and the browser freezes on the hvc1 codec
-  discontinuity mid-file. So each seek reopens the replay at the covering 5-min
-  segment start (~3-5s to first frame, then smooth realtime 4K). This is the
-  accepted current behavior, not a bug to "fix" naively.
+  and frees connections slowly. Reuse `hub.host`; never open a connection-per-call.
+  This now only affects **live** (RTSP source URLs + camera list) — playback no
+  longer touches the Hub at all.
+- **The NAS is read-only.** The backend only reads `Z:\reo`; the Hub/NAS owns
+  recording + retention there. Only `data/clips/` (the local remux cache) is ours
+  to write/purge.
+- **Fragmented MP4 needs a remux to seek.** The NAS MP4s have no `sidx`/`mfra`, so
+  a plain `<video>` can't seek the raw file — keep the `ffmpeg` remux-to-cache step
+  (`nas.py`); don't "simplify" by serving the NAS file directly.
+- **Don't `ffprobe` per segment** when building `/api/recordings`. Durations come
+  from neighbouring segment start times (the last/growing one from file mtime); a
+  per-file probe on a full day is needlessly slow.
 
 ## Gotchas
 
-- **bcplay streaming must hit backend `:8000` directly**, not through the Vite
-  `/api` proxy — the proxy buffers streaming responses and breaks the fetch.
-- ffmpeg for replay needs `-probesize 50000 -analyzeduration 0
-  -fflags +genpts+nobuffer -movflags frag_every_frame+empty_moov+default_base_moof
-  -flush_packets 1` or it buffers and emits nothing on the slow pipe; and
-  `-tag:v hvc1` so the MSE codec string (`hvc1.1.6.L186.B0`, Hub HEVC is **L186**)
-  matches. MSE needs `hvc1`, not `hev1`.
+- **Browser HEVC support varies.** Native 4K (`-c copy`) needs an HEVC decoder
+  (Safari; Edge with the HEVC Video Extensions; Chrome with hardware HEVC). The
+  frontend probes `video.canPlayType('…hvc1.1.6.L186.B0…')` (Hub HEVC is **L186**)
+  and falls back to `hevc=0` → backend 1080p H.264 transcode (slower per segment).
+  Keep `-tag:v hvc1` on the copy path so the codec string matches; use `hvc1`, not
+  `hev1`.
 - `bin/go2rtc.gen.yaml` and `backend/.env` contain the Hub password — both
   gitignored; never commit or echo them.
 - winget-installed tools (node, ffmpeg) aren't on the inherited PATH of processes

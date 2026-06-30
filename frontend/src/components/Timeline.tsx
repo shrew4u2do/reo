@@ -10,6 +10,8 @@ interface Props {
   dayStart: number
   segments: Segment[]
   currentTimeMs: number
+  /** Snapshot (JPEG) URL nearest a wall-clock time — shown as scrub preview. */
+  thumbUrl: (timeMs: number) => string
   /** Fired continuously while dragging (live scrub). */
   onScrub: (timeMs: number) => void
   /** Fired once when the drag/click settles. */
@@ -47,6 +49,7 @@ export default function Timeline({
   dayStart,
   segments,
   currentTimeMs,
+  thumbUrl,
   onScrub,
   onScrubEnd,
 }: Props) {
@@ -58,6 +61,8 @@ export default function Timeline({
   const pointers = useRef<Map<number, number>>(new Map())
   const pinch = useRef<{ span: number; dist: number; anchor: number } | null>(null)
 
+  // Floating JPEG preview shown above the cursor while scrubbing.
+  const [preview, setPreview] = useState<{ frac: number; ms: number } | null>(null)
   // The visible window into the day. span === DAY_MS means fully zoomed out.
   const [view, setView] = useState({ start: dayStart, span: DAY_MS })
   const zoomed = view.span < DAY_MS - 1
@@ -129,7 +134,9 @@ export default function Timeline({
       return
     }
     dragging.current = true
-    onScrub(timeFromClientX(e.clientX))
+    const t = timeFromClientX(e.clientX)
+    setPreview({ frac: fracOf(t), ms: t })
+    onScrub(t)
   }
   const onPointerMove = (e: React.PointerEvent) => {
     if (pointers.current.has(e.pointerId)) pointers.current.set(e.pointerId, e.clientX)
@@ -145,13 +152,16 @@ export default function Timeline({
       return
     }
     if (!dragging.current) return
-    onScrub(timeFromClientX(e.clientX))
+    const t = timeFromClientX(e.clientX)
+    setPreview({ frac: fracOf(t), ms: t })
+    onScrub(t)
   }
   const onPointerUp = (e: React.PointerEvent) => {
     pointers.current.delete(e.pointerId)
     if (pointers.current.size < 2) pinch.current = null
     if (dragging.current && pointers.current.size === 0) {
       dragging.current = false
+      setPreview(null)
       onScrubEnd(timeFromClientX(e.clientX))
     }
   }
@@ -226,7 +236,9 @@ export default function Timeline({
         </div>
       )}
 
-      {/* Detail bar: the zoomed window. Drag = scrub, wheel/pinch = zoom. */}
+      {/* Detail bar: the zoomed window. Drag = scrub, wheel/pinch = zoom. The wrap
+          is non-clipping so the scrub preview can float above the (clipped) bar. */}
+      <div className="timeline-barwrap">
       <div
         className="timeline-bar"
         ref={barRef}
@@ -258,6 +270,21 @@ export default function Timeline({
         {playheadInView && (
           <div className="timeline-playhead" style={{ left: `${fracOf(currentTimeMs) * 100}%` }} />
         )}
+      </div>
+
+      {preview && preview.frac >= 0 && preview.frac <= 1 && (
+        <img
+          className="timeline-thumb"
+          // Round to the minute: snapshots are per-minute, so this hits the same
+          // JPEG (and the browser cache) instead of a new request per pixel.
+          src={thumbUrl(Math.round(preview.ms / 60_000) * 60_000)}
+          alt=""
+          draggable={false}
+          style={{ left: `${preview.frac * 100}%` }}
+          onError={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = 'hidden')}
+          onLoad={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = 'visible')}
+        />
+      )}
       </div>
     </div>
   )

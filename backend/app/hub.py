@@ -38,6 +38,7 @@ class HubManager:
         self._host: Host | None = None
         self._cameras: list[Camera] = []
         self._lock = asyncio.Lock()
+        self._direct = False  # direct-to-camera mode (no Hub); see settings.camera_host
 
     @property
     def host(self) -> Host:
@@ -54,6 +55,19 @@ class HubManager:
 
     async def connect(self) -> None:
         async with self._lock:
+            if settings.camera_host:
+                # Direct-to-camera: no Hub connection. Define the camera from config;
+                # RTSP is built straight from its IP in rtsp_url().
+                self._direct = True
+                self._cameras = [
+                    Camera(
+                        channel=0,
+                        name=settings.camera_name,
+                        online=True,
+                        slug=_slugify(settings.camera_name, 0),
+                    )
+                ]
+                return
             host = Host(
                 settings.host,
                 settings.username,
@@ -91,12 +105,21 @@ class HubManager:
         self._cameras = cams
 
     async def refresh_states(self) -> None:
+        if self._direct:
+            return
         async with self._lock:
             await self.host.get_states()
             await self._refresh_cameras()
 
     async def rtsp_url(self, channel: int, stream: str) -> str | None:
         """stream is 'main' or 'sub'. Returns full rtsp:// URL with creds."""
+        if self._direct:
+            # Reolink single-camera RTSP paths are 1-indexed (Preview_01_*).
+            kind = "main" if stream == "main" else "sub"
+            return (
+                f"rtsp://{settings.username}:{settings.password}"
+                f"@{settings.camera_host}:554/Preview_{channel + 1:02d}_{kind}"
+            )
         return await self.host.get_rtsp_stream_source(channel, stream)
 
     async def search_recordings(
@@ -125,6 +148,9 @@ class HubManager:
             )
 
     async def close(self) -> None:
+        if self._direct:
+            self._host = None
+            return
         if self._host is not None:
             try:
                 await self._host.logout()
